@@ -40,6 +40,9 @@ PACKET_SIZE = 1471
 # packets).
 WINDOW_SIZE = 7
 
+# Fast retransmit constants
+FAST_RETRANSMIT_MAX_DUPLICATIONS = 4
+
 '''
 This is a skeleton sender class. Create a fantastic transport protocol here.
 '''
@@ -61,6 +64,9 @@ class Sender(BasicSender.BasicSender):
 
         # Packet body
         self.packet_body = PACKET_BODY_EMPTY
+
+        # For fast transmit
+        self.fast_retransmit_counter = 0
 
     # Main sending loop.
     def start(self):
@@ -151,6 +157,20 @@ class Sender(BasicSender.BasicSender):
                 elif self.sequence_number_is_past_window(ack_sequence_number):
                     # Update the window
                     self.move_window_sequence_number(ack_sequence_number)
+                elif self.sequence_number_is_at_window(ack_sequence_number):
+                    """
+                    Go Back N sender retransmits the unacknowledged packet only on a timeout event, 
+                    which can wait up to 500ms. Instead, we can detect the packet loss event by 
+                    duplicated ack event. If we receive three duplicate acknowledgements (that is, 
+                    receiving the same acknowledgement number for 4 times), we are almost sure the 
+                    packet has been lost and we should immediately retransmit the packet.
+                    """
+                    self.fast_retransmit_counter += 1
+                    if self.fast_retransmit_counter >= FAST_RETRANSMIT_MAX_DUPLICATIONS:
+                        self.fast_retransmit_counter = 0
+                        packet = self.packet_for_sequence_number(ack_sequence_number)
+                        if packet:
+                            self.send(packet)
         else:
             # Need to re-send the entire window!
             self.resend_window()
@@ -183,7 +203,18 @@ class Sender(BasicSender.BasicSender):
             self.window.remove(packet)
         self.window_sequence_number = new_window_sequence_number
 
+    def packet_for_sequence_number(self, ack_sequence_number):
+        for packet in self.window:
+            components = self.packet_components(packet)
+            packet_sequence_number = int(components[PACKET_COMPONENT_SEQUENCE_NUMBER])
+            if packet_sequence_number == ack_sequence_number:
+                return packet
+        return None
+
     def resend_window(self):
+        # Reset the transmit counter to 0
+        self.fast_retransmit_counter = 0
+        # Send every packet again
         for packet in self.window:
             self.send(packet)
 
