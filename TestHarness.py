@@ -15,7 +15,7 @@ you want to run. The tests automatically register themselves with the
 forwarder, so they will magically be run.
 """
 def tests_to_run(forwarder):
-    BasicTest.BasicTest("BasicTest", forwarder, "README")
+    BasicTest.BasicTest("BasicTest", forwarder, "README2")
     RandomDropTest.RandomDropTest("RandDropTest", forwarder, "README")
     SackRandomDropTest.SackRandomDropTest("SackTest", forwarder, "README")
     SeqnoAndTypeTest.SeqnoAndTypeTest("BinaryDrpDat", f, "b.png", seqnos = range(0,10000,2), types = ["dat"])

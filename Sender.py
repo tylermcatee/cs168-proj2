@@ -9,6 +9,8 @@ import BasicSender
 # "You can use any initial sequence number. Don't have to be random"
 # Decided to use my favorite number
 INITIAL_SEQUENCE_NUMBER = 725
+# For being a placeholder until we determine what our final sequence number will be
+FINAL_SEQUENCE_NUMBER_PLACEHOLDER = -1
 
 # Define my message types as constants
 MSG_TYPE_SYN = 'syn'
@@ -17,7 +19,7 @@ MSG_TYPE_FIN = 'fin'
 MSG_TYPE_ACK = 'ack'
 
 # Define any special message bodies as constants
-MSG_BODY_EMPTY = ''
+PACKET_BODY_EMPTY = ''
 
 # The sender should implement a 500ms retransmission timer to automatically
 # retransmit packets that were never acknowledged (potentially due to ackpackets
@@ -52,11 +54,20 @@ class Sender(BasicSender.BasicSender):
 
         # Keep track of the current window of packets being sent out to the receiver
         self.window = []
+        # To know the base value of our window currently
+        self.window_sequence_number = INITIAL_SEQUENCE_NUMBER
+        # To know when our sequence is finished.
+        self.final_sequence_number = FINAL_SEQUENCE_NUMBER_PLACEHOLDER
+
+        # Packet body
+        self.packet_body = PACKET_BODY_EMPTY
 
     # Main sending loop.
     def start(self):
         # First step in the BEARS-TP protocol is to do a hand shake
         self.hand_shake()
+        # Get the body of data to send using the packet size
+        self.packet_body = self.infile.read(PACKET_SIZE)
         # Second step is to transmit the actual data
         self.transmit_data()
         # Done
@@ -66,7 +77,7 @@ class Sender(BasicSender.BasicSender):
 
     def hand_shake(self):
         # Create a syn packet with the random initial sequence number
-        syn_packet = self.make_packet(MSG_TYPE_SYN, self.sequence_number, MSG_BODY_EMPTY)
+        syn_packet = self.make_packet(MSG_TYPE_SYN, self.sequence_number, PACKET_BODY_EMPTY)
 
         # Prepare to receive
         ack_packet = None
@@ -85,52 +96,96 @@ class Sender(BasicSender.BasicSender):
                 # Split apart the packet
                 components = self.packet_components(ack_packet)
                 ack_msg_type = components[PACKET_COMPONENT_MSG_TYPE]
-                ack_sequence_number = components[PACKET_COMPONENT_SEQUENCE_NUMBER]
+                ack_sequence_number = int(components[PACKET_COMPONENT_SEQUENCE_NUMBER])
+                # Validate the checksum
+                valid_checksum = Checksum.validate_checksum(ack_packet)
+                if not valid_checksum:
+                    ack_packet = None
 
-        print("Successful handshake")
-        # If we have a successful hand shake we should advance our sequence number
-        self.sequence_number += 1
 
     def transmit_data(self):
 
-        # Get the body of data to send using the packet size
-        packet_body = self.infile.read(PACKET_SIZE)
         # Fill the window
-        while len(self.window) < WINDOW_SIZE and packet_body != MSG_BODY_EMPTY:
+        while len(self.window) < WINDOW_SIZE and self.packet_body != PACKET_BODY_EMPTY:
             # Get the next packet body so we can see if this one is the final one or not
             next_packet_body = self.infile.read(PACKET_SIZE)
             # Advance the sequence number
             self.sequence_number += 1
 
-            if next_packet_body != MSG_BODY_EMPTY:
-                print("Sending dat packet")
+            if next_packet_body != PACKET_BODY_EMPTY:
                 # The current packet is not the last, full transmission!
-                dat_packet = self.make_packet(MSG_TYPE_DAT, self.sequence_number, packet_body)
+                dat_packet = self.make_packet(MSG_TYPE_DAT, self.sequence_number, self.packet_body)
                 # Send out the packet
                 self.send(dat_packet)
                 # Add the packet to our current window
                 self.window.append(dat_packet)
             else:
-                print("Sending fin packet")
                 # The current packet is the LAST!
-                fin_packet = self.make_packet(MSG_TYPE_FIN, self.sequence_number, packet_body)
+                fin_packet = self.make_packet(MSG_TYPE_FIN, self.sequence_number, self.packet_body)
                 # Send out the packet
                 self.send(fin_packet)
                 # Add the packet to our current window
                 self.window.append(fin_packet)
+                # Note that this is our final sequence number
+                self.final_sequence_number = self.sequence_number
 
             # Update the packet_body to next_packet_body
-            packet_body = next_packet_body
+            self.packet_body = next_packet_body
 
         # Now that we have sent out the window, we want to get the responses
         ack_packet = self.receive(RETRANSMISSION_TIME)
 
         if ack_packet:
-            print("Received ack!")
-        else:
-            print("Timed out.")
+            # Split apart the packet
+            components = self.packet_components(ack_packet)
+            ack_msg_type = components[PACKET_COMPONENT_MSG_TYPE]
+            ack_sequence_number = int(components[PACKET_COMPONENT_SEQUENCE_NUMBER])
 
+            # Only continue if checksum is valid
+            valid_checksum = Checksum.validate_checksum(ack_packet)
+            if valid_checksum:
+                # Check to see if we are done
+                if self.sequence_number_is_last(ack_sequence_number):
+                    # We are finished, return to the start() method
+                    return
+                elif self.sequence_number_is_past_window(ack_sequence_number):
+                    # Update the window
+                    self.move_window_sequence_number(ack_sequence_number)
+        else:
+            # Need to re-send the entire window!
+            self.resend_window()
+
+        # We didn't finish, transmit more data
         self.transmit_data()
+
+    def sequence_number_is_last(self, ack_sequence_number):
+        return ack_sequence_number == self.final_sequence_number + 1
+
+    def sequence_number_is_past_window(self, ack_sequence_number):
+        return ack_sequence_number >= self.window_sequence_number + 1
+
+    def sequence_number_is_at_window(self, ack_sequence_number):
+        return ack_sequence_number == self.window_sequence_number
+
+    def move_window_sequence_number(self, new_window_sequence_number):
+        """
+        Takes a new window sequence number
+        Looks at our current window and removes all packets under the new sequence number
+        Advances self.window_sequence_number to new_window_sequence_number
+        """
+        packets_to_remove = []
+        for packet in self.window:
+            components = self.packet_components(packet)
+            packet_sequence_number = int(components[PACKET_COMPONENT_SEQUENCE_NUMBER])
+            if packet_sequence_number < new_window_sequence_number:
+                packets_to_remove.append(packet)
+        for packet in packets_to_remove:
+            self.window.remove(packet)
+        self.window_sequence_number = new_window_sequence_number
+
+    def resend_window(self):
+        for packet in self.window:
+            self.send(packet)
 
 
         
